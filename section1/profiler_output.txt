@@ -1,0 +1,41 @@
+
+User: testuser (id=1)
+Orders: 250
+============================================================
+BROKEN ENDPOINT  (no prefetch_related)
+============================================================
+  Total SQL queries: 988
+  Response time:     0.127s
+  Status code:       200
+  Records returned:  250
+
+  First 6 SQL queries (showing N+1 pattern):
+    [1] SELECT "orders_order"."id", "orders_order"."user_id", "orders_order"."status", "orders_order"."total...
+    [2] SELECT "orders_orderitem"."id", "orders_orderitem"."order_id", "orders_orderitem"."product_id", "ord...
+    [3] SELECT "orders_product"."id", "orders_product"."name", "orders_product"."price" FROM "orders_product...
+    [4] SELECT "orders_product"."id", "orders_product"."name", "orders_product"."price" FROM "orders_product...
+    [5] SELECT "orders_product"."id", "orders_product"."name", "orders_product"."price" FROM "orders_product...
+    [6] SELECT "orders_product"."id", "orders_product"."name", "orders_product"."price" FROM "orders_product...
+    ... and 982 more queries
+
+============================================================
+FIXED ENDPOINT  (with prefetch_related)
+============================================================
+  Total SQL queries: 3
+  Response time:     0.019s
+  Status code:       200
+  Records returned:  250
+
+  All 3 SQL queries:
+    [1] SELECT "orders_order"."id", "orders_order"."user_id", "orders_order"."status", "orders_order"."total_amount", "orders_or...
+    [2] SELECT "orders_orderitem"."id", "orders_orderitem"."order_id", "orders_orderitem"."product_id", "orders_orderitem"."quan...
+    [3] SELECT "orders_product"."id", "orders_product"."name", "orders_product"."price" FROM "orders_product" WHERE "orders_prod...
+
+============================================================
+SUMMARY
+============================================================
+  Metric                        Broken      Fixed     Improvement
+  ------------------------- ---------- ---------- ---------------
+  SQL queries                      988          3            329x fewer
+  Response time                 0.127s     0.019s            6.7x faster
+
