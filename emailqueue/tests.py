@@ -9,11 +9,13 @@ Infrastructure:
 
 What we assert:
   1. Rate limiter allows requests up to the limit and blocks beyond it
-  2. Rate limiter uses atomic Redis operations (Lua script) correctly
+  2. Rate limiter uses atomic Redis operations (WATCH + MULTI/EXEC) correctly
   3. 500 submitted tasks: none lost, rate limit respected across all
   4. Intentional failures retry with exponential backoff
   5. Permanently failed tasks land in FailedEmailTask (dead-letter)
   6. Redis unavailability causes fail-closed behaviour
+  7. A job rate-limited more than MAX_SEND_ATTEMPTS times still survives
+     (regression test for a real bug — see DESIGN.md and section2/VERIFICATION.md)
 """
 import time
 import unittest
@@ -104,9 +106,10 @@ class SlidingWindowRateLimiterTest(TestCase):
 
     def test_concurrent_requests_do_not_exceed_limit(self):
         """
-        Simulate rapid concurrent calls — the Lua script must be atomic,
-        so even if two calls arrive simultaneously, neither sees a stale count.
-        fakeredis serialises everything so this tests the logic, not threading.
+        Simulate rapid concurrent calls — the WATCH + MULTI/EXEC transaction
+        must be atomic, so even if two calls arrive simultaneously, neither
+        sees a stale count. fakeredis serialises everything so this tests the
+        logic, not threading.
         """
         limiter = make_limiter(limit=10)
         allowed = 0
@@ -158,7 +161,7 @@ class SendEmailTaskTest(TestCase):
     def test_intentional_failure_retries_and_dead_letters(self):
         """
         Subject prefixed with 'FAIL:' causes EmailSendError on every attempt.
-        After max_retries (4), the task writes to FailedEmailTask.
+        After MAX_SEND_ATTEMPTS (4), the task writes to FailedEmailTask.
         This proves: retry logic works AND dead-letter store is populated.
         """
         send_email = self._make_patched_task()
@@ -174,12 +177,11 @@ class SendEmailTaskTest(TestCase):
         self.assertEqual(FailedEmailTask.objects.count(), 1)
         failed = FailedEmailTask.objects.first()
         self.assertEqual(failed.recipient, 'user@example.com')
-        self.assertEqual(failed.retry_count, 4)  # max_retries=4
+        self.assertEqual(failed.retry_count, 4)  # MAX_SEND_ATTEMPTS=4
 
     def test_rate_limit_exceeded_triggers_retry(self):
         """
-        When the rate limiter is full, the task raises RateLimitExceeded
-        which Celery retries.
+        When the rate limiter is full, the task retries rather than failing.
         """
         fake_redis = fakeredis.FakeRedis()
         send_email = self._make_patched_task(fake_redis=fake_redis, limit=1)
@@ -188,12 +190,48 @@ class SendEmailTaskTest(TestCase):
         result = send_email.apply(args=['a@example.com', 'Subject', 'Body'])
         self.assertEqual(result.result['status'], 'sent')
 
-        # second email: hit rate limit -> retries 5 times -> fails with RateLimitExceeded
-        # (It doesn't dead-letter because RateLimitExceeded is not caught in the
-        # dead-letter block, which is intended for SMTP errors).
+        # second email: rate limit is full (limit=1, one slot already taken).
+        # Free the slot before retrying to prove the job survives and
+        # eventually sends, rather than being dropped after 4 attempts.
+        # NOTE: the task's limiter key is 'email:rate_limit' (see
+        # _make_patched_task), not the 'test:rate_limit' key used by the
+        # standalone SlidingWindowRateLimiterTest cases above.
+        fake_redis.delete('email:rate_limit')
         result2 = send_email.apply(args=['b@example.com', 'Subject 2', 'Body 2'])
+        self.assertEqual(result2.result['status'], 'sent')
 
-        self.assertIsInstance(result2.result, RateLimitExceeded)
+    def test_survives_more_than_four_rate_limit_retries(self):
+        """
+        Regression test for a real bug found running this against a live
+        Redis + Celery worker: rate-limit retries used to share Celery's
+        `max_retries` counter with provider-failure retries. A job rate
+        limited more than 4 times (routine during a real burst — 2,000
+        requests against a 200/min cap) hit MaxRetriesExceededError in a
+        branch that doesn't dead-letter, and was silently dropped: no
+        'sent' result, no FailedEmailTask row, nothing.
+
+        This job is rate-limited 8 times in a row (twice MAX_SEND_ATTEMPTS)
+        before capacity frees up, and must still succeed — not vanish and
+        not dead-letter for a problem that was never a provider failure.
+        """
+        from emailqueue import tasks as task_module
+
+        calls = {'n': 0}
+
+        class FlakyLimiter:
+            def acquire(self):
+                calls['n'] += 1
+                if calls['n'] <= 8:
+                    raise RateLimitExceeded("simulated burst backlog")
+
+        task_module._rate_limiter = FlakyLimiter()
+        result = task_module.send_email.apply(
+            args=['user@example.com', 'Order confirmation', 'Body']
+        )
+
+        self.assertEqual(result.result['status'], 'sent')
+        self.assertEqual(calls['n'], 9)
+        self.assertEqual(FailedEmailTask.objects.count(), 0)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +317,6 @@ class FiveHundredJobsTest(TestCase):
         # Dead-lettered tasks must have exhausted retries (retry_count == max_retries)
         for failed in FailedEmailTask.objects.all():
             self.assertEqual(
-                failed.retry_count, 4,  # max_retries=4
+                failed.retry_count, 4,  # MAX_SEND_ATTEMPTS=4
                 f"Task {failed.task_id} didn't fully retry before dead-lettering",
             )
