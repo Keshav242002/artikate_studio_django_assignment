@@ -63,3 +63,45 @@ Two settings make this safe, both set globally in `config/settings.py`:
 Net effect: a task being executed when its worker is `SIGKILL`'d is **redelivered and retried from scratch on another worker** — it is not lost. The trade-off is at-least-once delivery, not exactly-once: if the process died *after* `_send_via_provider()` succeeded but *before* the task returned, the email would be sent twice. We accept this because a duplicate transactional email is a far smaller problem than a silently dropped order confirmation or OTP. A true exactly-once guarantee would need an idempotency key at the provider side, which is out of scope here.
 
 Full reasoning for the rate limiter's atomicity guarantee and fail-closed behaviour under Redis failure is in `DESIGN.md` §2.
+
+## Section 3 — Multi-Tenant Data Isolation
+
+Implementation lives in the new `tenants` app: `tenants/models.py` (`Tenant`), `tenants/context.py` (contextvar utility), `tenants/managers.py` (`TenantManager`), `tenants/middleware.py` (`TenantMiddleware`). `Order` gained a required `tenant` ForeignKey and now uses `TenantManager` as `objects`. Tests are in `tenants/tests.py`.
+
+### Why `contextvars.ContextVar`, not `threading.local`, from the start
+
+Thread-local storage (`threading.local()`) fails under async because Django's ASGI mode can run multiple coroutines concurrently on the same OS thread via the event loop. A thread-local value set in one request's coroutine is visible to another request's coroutine running on that same thread, because thread-locals key on the thread, not the logical request. This means Tenant A's context can leak into Tenant B's queryset mid-request — a direct data isolation failure, which is the exact vulnerability this section is designed to prevent.
+
+`contextvars.ContextVar`, introduced in Python 3.7 specifically for async code, instead keys on the current execution context, which `asyncio` copies automatically at each `await` point — so each coroutine sees only its own value regardless of which thread runs it. Since I used `ContextVar` from the start (`tenants/context.py`) rather than `threading.local()`, this implementation is already async-safe — the async answer and the shipped code are the same thing, not a hypothetical fix.
+
+### Why `get_queryset()` is overridden, not `all()`
+
+The scaffold's comment ("even when the caller has no knowledge of tenant context") points at `get_queryset()` specifically: every other manager entry point — `filter()`, `get()`, `first()`, `count()` — routes through `get_queryset()` internally. Overriding only `all()` would leave those other calls completely unscoped, which is the exact bypass this section is testing for. `tenants/tests.py::test_filter_and_get_are_also_scoped` proves `.filter()` and `.get()` are constrained too, not just `.all()`.
+
+### Fail-closed, not fail-open
+
+`TenantManager.get_queryset()` returns `qs.none()` when `get_current_tenant()` is `None`, rather than falling back to unscoped `super().get_queryset()`. A forgotten `set_current_tenant()` call (e.g. a new code path that bypasses the middleware) then shows zero rows instead of every tenant's rows. That is the difference between a visibly broken feature — caught immediately in testing — and a silent cross-tenant data breach. `test_no_tenant_context_returns_nothing` proves this explicitly.
+
+### Middleware `try/finally`
+
+`TenantMiddleware.__call__` wraps `get_response(request)` in `try/finally`, resetting the contextvar in `finally`. Without it, a view raising an exception would leave that request's tenant bound to the context — and since Gunicorn workers and ASGI tasks are reused across requests, that stale tenant could leak into whichever request runs next on the same worker/context. `test_middleware_resets_context_after_request_even_on_exception` proves the reset happens even when `get_response` raises.
+
+### Tenant extraction: subdomain primary, JWT fallback — explicit scope note
+
+`TenantMiddleware._resolve_tenant()` first looks up `Tenant.objects.filter(slug=<subdomain>)` from `request.get_host()`. If no tenant matches, it falls back to decoding a `tenant_id` claim from an `Authorization: Bearer <jwt>` header, verified with `PyJWT` against `settings.SECRET_KEY`. This is a hand-decoded check, not a full `djangorestframework-simplejwt` integration — there is no login endpoint, token issuance, or refresh flow, since building real auth infrastructure was out of scope for this section. In a production system the JWT would come from a proper auth service and be verified against its public key, not the Django `SECRET_KEY`.
+
+**Known edge case:** subdomain extraction is `request.get_host().split(':')[0].split('.')[0]` — the first label before the first dot. For a real subdomain (`acme.example.com`) this correctly yields `acme`. But for a bare domain with no subdomain at all (`example.com`), it yields `example`, which would silently match a tenant slugged `"example"` if one existed — there's no explicit check that the host actually *has* a subdomain segment before treating the first label as one. This is a real gap, not just a hypothetical: a production version would validate the host has at least 3 labels (`sub.domain.tld`) before treating the first as a tenant slug, or use an explicit `X-Tenant-Slug` header instead of parsing it out of the host.
+
+### Admin / management-command context gap
+
+`TenantMiddleware` only binds tenant context during the HTTP request/response cycle. `python manage.py seed_data` and Django admin access at a non-tenant host both fall outside that cycle:
+- `seed_data.py` works around this by explicitly binding `set_current_tenant(tenant)` for the duration of the command (see its `handle()`), since row creation always needs `tenant=` regardless of context, but its `count()`/`filter()` reads still go through the scoped manager.
+- Admin access at a non-tenant host (e.g. `localhost/admin` with no matching subdomain and no JWT) currently sees **no orders**, by design, under the fail-closed manager. This is intentional given the "fail closed, not open" decision above, but it is a real limitation: a production follow-up would add an explicit tenant-selection mechanism for staff/admin use (e.g. a superuser-only tenant switcher bound into the same contextvar) rather than leaving admin unusable at non-tenant hosts.
+
+### Migration strategy
+
+Chose to make the `tenant` FK non-nullable and reseed (`rm db.sqlite3 && migrate && seed_data`) rather than a null → backfill → non-null migration sequence, since this is a disposable dev/seed SQLite database, not a production table requiring a zero-downtime backfill. In production, the safe sequence would be: add `tenant` as nullable, backfill existing rows in batches, then add a `NOT NULL` constraint in a separate migration — done here in one step because there is no real data or uptime constraint to protect.
+
+### Async failure modes of thread-local tenant scoping (if it had been used) and what would change
+
+Even though this implementation avoids the problem by using `ContextVar`, to state the async failure mode explicitly: under Django's ASGI/async views, multiple requests' coroutines can interleave on the same OS thread inside the event loop. `threading.local()` state is keyed per-thread, not per-coroutine, so a value set for Tenant A's request can still be readable — or silently overwritten — from Tenant B's request if both happen to execute on the same thread at overlapping times. This is a genuine cross-tenant data leak, not just a theoretical concern, since Django's async request handling does not guarantee one thread per request the way WSGI does. The fix is exactly what was implemented here: replace `threading.local()` with `contextvars.ContextVar`, whose values are scoped to the async context that `asyncio`/ASGI propagates correctly across `await` boundaries, and set/read it via the middleware's `set_current_tenant`/`get_current_tenant` rather than a module-level thread-local object.

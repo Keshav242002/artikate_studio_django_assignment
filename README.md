@@ -111,11 +111,34 @@ Watch the worker log: normal jobs send immediately (up to 200/min), the `FAIL:` 
 | `DESIGN.md` | Architecture decisions and trade-offs for Section 2 |
 | `section2/VERIFICATION.md` | Test run + live Redis/Celery run evidence, including a real bug found and fixed |
 
+## Section 3 — Multi-Tenant Data Isolation
+
+Full reasoning — `contextvars` vs `threading.local`, fail-closed design, the async written answer — is in `ANSWERS.md`.
+
+`seed_data` creates/assigns a default "Acme Corp" tenant (`slug=acme`) to seeded orders automatically, so the Section 1/2 setup steps above don't need any changes.
+
+**Run the tests:**
+```bash
+python manage.py test tenants -v2
+```
+Proves: tenant A cannot see tenant B's orders through any manager call (`.all()`, `.filter()`, `.get()`), a missing tenant context fails closed (returns zero rows, not all rows), and `TenantMiddleware` resolves a tenant from the request's subdomain or an `Authorization: Bearer <jwt>` header and always resets its context — even when the view raises.
+
+**Files:**
+| File | Purpose |
+|---|---|
+| `tenants/models.py` | `Tenant` model |
+| `tenants/context.py` | `contextvars.ContextVar`-based current-tenant storage |
+| `tenants/managers.py` | `TenantManager` — auto-scopes every queryset, fails closed |
+| `tenants/middleware.py` | `TenantMiddleware` — subdomain-primary, JWT-header fallback |
+| `tenants/tests.py` | Isolation tests, including the negative cases |
+| `orders/models.py` | `Order.tenant` FK, `Order.objects = TenantManager()` |
+| `section3/VERIFICATION.md` | Test run output + a live shell proof of fail-closed behaviour |
+
 ## Project Structure
 
 ```
 ├── README.md
-├── ANSWERS.md           # Written answers (Sections 1 + 2)
+├── ANSWERS.md           # Written answers (Sections 1 + 2 + 3)
 ├── DESIGN.md            # Section 2 architecture doc
 ├── requirements.txt
 ├── manage.py
@@ -142,5 +165,14 @@ Watch the worker log: normal jobs send immediately (up to 200/min), the `FAIL:` 
 │   ├── admin.py
 │   └── tests.py
 ├── section2/
+│   └── VERIFICATION.md
+├── tenants/              # Section 3 — multi-tenant data isolation
+│   ├── models.py
+│   ├── context.py
+│   ├── managers.py
+│   ├── middleware.py
+│   ├── admin.py
+│   └── tests.py
+├── section3/
 │   └── VERIFICATION.md
 ```
