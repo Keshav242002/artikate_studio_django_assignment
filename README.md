@@ -70,11 +70,52 @@ ead6351  Initial project: order summary API endpoint          (you)
 a5073a9  fix: resolve N+1 queries in order summary endpoint   (you — the fix)
 ```
 
+## Section 2 — Rate-Limited Async Job Queue
+
+Architecture decisions, rate limiter design, and trade-offs are in [`DESIGN.md`](DESIGN.md).
+
+**Run the tests (no Redis or worker process needed):**
+```bash
+python manage.py test emailqueue -v2
+```
+Tests use `fakeredis` and Celery's eager mode (`CELERY_TASK_ALWAYS_EAGER`), so the full suite — including the 500-job test — runs in-process with no external services. This includes the required test asserting: no job is lost across 500 submitted jobs, the rate limit (200/window) is never exceeded, and 10 intentionally-failing jobs retry with exponential backoff before landing in the dead-letter table.
+
+**Run it against a real Redis + Celery worker (optional, to see it end-to-end):**
+```bash
+# Terminal 1 — start Redis
+redis-server
+
+# Terminal 2 — start a Celery worker
+source venv/bin/activate
+celery -A config worker -l info
+
+# Terminal 3 — submit jobs from the Django shell
+source venv/bin/activate
+python manage.py shell -c "
+from emailqueue.tasks import send_email
+for i in range(20):
+    send_email.delay(f'user{i}@example.com', 'Order confirmation', 'Thanks for your order!')
+send_email.delay('user@example.com', 'FAIL: trigger a retry', 'Body')
+"
+```
+Watch the worker log: normal jobs send immediately (up to 200/min), the `FAIL:` job retries 4 times with backoff (1s, 2s, 4s, 8s) before writing to `FailedEmailTask` (visible at `/admin/emailqueue/failedemailtask/`).
+
+**Files:**
+| File | Purpose |
+|---|---|
+| `emailqueue/tasks.py` | `send_email` Celery task — retry, exponential backoff, dead-letter |
+| `emailqueue/rate_limiter.py` | `SlidingWindowRateLimiter` — Redis sorted set + WATCH/MULTI/EXEC |
+| `emailqueue/models.py` | `FailedEmailTask` — dead-letter store |
+| `emailqueue/tests.py` | Rate limiter unit tests + 500-job integration test |
+| `config/celery.py` | Celery app definition |
+| `DESIGN.md` | Architecture decisions and trade-offs for Section 2 |
+| `section2/VERIFICATION.md` | Test run + live Redis/Celery run evidence, including a real bug found and fixed |
+
 ## Project Structure
 
 ```
 ├── README.md
-├── ANSWERS.md           # Written answers (Sections 1 + 4)
+├── ANSWERS.md           # Written answers (Sections 1 + 2)
 ├── DESIGN.md            # Section 2 architecture doc
 ├── requirements.txt
 ├── manage.py
@@ -94,4 +135,12 @@ a5073a9  fix: resolve N+1 queries in order summary endpoint   (you — the fix)
 │   ├── silk_requests_list.png
 │   ├── silk_broken_detail.png
 │   └── silk_fixed_detail.png
+├── emailqueue/           # Section 2 — rate-limited async job queue
+│   ├── tasks.py
+│   ├── rate_limiter.py
+│   ├── models.py
+│   ├── admin.py
+│   └── tests.py
+├── section2/
+│   └── VERIFICATION.md
 ```
