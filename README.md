@@ -134,11 +134,15 @@ Proves: tenant A cannot see tenant B's orders through any manager call (`.all()`
 | `orders/models.py` | `Order.tenant` FK, `Order.objects = TenantManager()` |
 | `section3/VERIFICATION.md` | Test run output + a live shell proof of fail-closed behaviour |
 
+## Section 4 — Written Architecture Review
+
+No code — answers to two of the three questions (Pagination Trade-offs, File Upload Security) are in `ANSWERS.md`.
+
 ## Project Structure
 
 ```
 ├── README.md
-├── ANSWERS.md           # Written answers (Sections 1 + 2 + 3)
+├── ANSWERS.md           # Written answers for all four sections
 ├── DESIGN.md            # Section 2 architecture doc
 ├── requirements.txt
 ├── manage.py

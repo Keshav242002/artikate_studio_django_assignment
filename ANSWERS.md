@@ -105,3 +105,31 @@ Chose to make the `tenant` FK non-nullable and reseed (`rm db.sqlite3 && migrate
 ### Async failure modes of thread-local tenant scoping (if it had been used) and what would change
 
 Even though this implementation avoids the problem by using `ContextVar`, to state the async failure mode explicitly: under Django's ASGI/async views, multiple requests' coroutines can interleave on the same OS thread inside the event loop. `threading.local()` state is keyed per-thread, not per-coroutine, so a value set for Tenant A's request can still be readable — or silently overwritten — from Tenant B's request if both happen to execute on the same thread at overlapping times. This is a genuine cross-tenant data leak, not just a theoretical concern, since Django's async request handling does not guarantee one thread per request the way WSGI does. The fix is exactly what was implemented here: replace `threading.local()` with `contextvars.ContextVar`, whose values are scoped to the async context that `asyncio`/ASGI propagates correctly across `await` boundaries, and set/read it via the middleware's `set_current_tenant`/`get_current_tenant` rather than a module-level thread-local object.
+
+## Section 4 — Written Architecture Review
+
+The brief asks for any two of the three questions. Answering **B (Pagination Trade-offs)** and **C (File Upload Security)** — both ground more directly in this repo: `OrderSummaryView` already returns an unpaginated list, and Section 3's `Tenant`/`Order` models are the kind of data a real file-upload feature (e.g. tenant logos, order attachments) would eventually sit next to.
+
+### Question B — Pagination Trade-offs
+
+**Offset-based** (DRF's `PageNumberPagination`/`LimitOffsetPagination`) generates `SELECT ... ORDER BY id LIMIT <n> OFFSET <m>`. The database must still walk and discard the first `m` rows before it can return the next `n` — on Postgres this shows up as a `Limit` node sitting on top of a scan that produces and throws away `m` rows first. Cost grows linearly with page depth: page 1 of 10,000 records is cheap, page 500 (`OFFSET 250000`) is not, even with an index on the ordering column, because the index only avoids a full table scan, not the row-skipping itself.
+
+The sharper problem is correctness under mutation. If a row is inserted or deleted ahead of the current offset while a mobile app is mid infinite-scroll, every subsequent page shifts by one — the user either sees a duplicate row (a delete happened) or silently misses one (an insert happened). This is invisible in testing with a static dataset and shows up only in production under real write traffic, which is exactly the mobile-dashboard scenario here.
+
+**Cursor-based** (DRF's `CursorPagination`) instead encodes the last-seen value of a unique, indexed, monotonic ordering field (e.g. `id`, or `created_at` with `id` as a tiebreaker) into an opaque token, and issues `WHERE id > <cursor_value> ORDER BY id LIMIT n`. This is a direct indexed lookup, not a skip — cost stays flat regardless of page depth, and it's immune to the drift problem above because the cursor references a row's identity, not its position; rows inserted or deleted elsewhere in the table don't shift what "next" means.
+
+The trade-off: cursor pagination can't jump to an arbitrary page number ("go to page 50") — there's no numeric page concept — and a reliable total count still costs a full `COUNT(*)` regardless of style, so it's usually dropped for cursor APIs. For this 10,000-record endpoint, with infinite scroll as the access pattern and orders arriving continuously, I'd choose cursor-based: "jump to page N" isn't something infinite scroll needs, so offset's one advantage doesn't apply here.
+
+### Question C — File Upload Security
+
+Five distinct attack vectors and the Django-layer mitigation for each:
+
+1. **Extension/MIME spoofing** — a file named `shell.jpg` that is actually a PHP script or polyglot, uploaded past a naive extension check. Mitigation: never trust the client-supplied filename extension or `Content-Type` header; verify the actual bytes server-side — for images, `PIL.Image.open(f).verify()` inside a `try/except`, or `python-magic` to sniff the real MIME type against an explicit whitelist, rejecting anything that doesn't match what was declared.
+
+2. **Path traversal via filename** — a filename like `../../../etc/cron.d/evil` used to escape the intended upload directory if the server ever joins the raw client filename into a path. Mitigation: never use the client-supplied name to build a storage path; generate the stored filename yourself (e.g. `f"{uuid4()}{ext}"` in `upload_to`), and if using Django's default `FileSystemStorage`, rely on `Storage.get_available_name()` — which calls `django.utils.text.get_valid_name()` — rather than a custom storage backend that skips sanitization.
+
+3. **Unbounded upload size (resource-exhaustion DoS)** — an attacker sends a multi-gigabyte file to exhaust memory or disk. Mitigation: `DATA_UPLOAD_MAX_MEMORY_SIZE`/`FILE_UPLOAD_MAX_MEMORY_SIZE` cap in-memory buffering before spilling to a temp file, but neither rejects the upload outright — explicitly check `request.META['CONTENT_LENGTH']` against a hard limit before the body is read, plus a matching size validator on the serializer's `FileField`.
+
+4. **Stored XSS via inline-served uploads** — an uploaded SVG or HTML file containing `<script>` that executes when served back under the app's own origin. Mitigation: serve uploads from a separate, cookieless domain, force `Content-Disposition: attachment` for non-image types, and either disallow SVG/HTML via a strict MIME whitelist or re-encode SVGs to a raster format server-side before storage.
+
+5. **Image decompression bombs** — a small file that decodes to an enormous pixel grid (e.g. a crafted PNG claiming 50,000×50,000 pixels), exhausting memory during thumbnailing or processing. Mitigation: keep PIL's built-in `Image.MAX_IMAGE_PIXELS` guard enabled (never set it to `None`) so `PIL.Image.DecompressionBombError` is raised above the default ~89-million-pixel threshold, and additionally check `image.size` against an explicit application-level maximum before any further processing.
