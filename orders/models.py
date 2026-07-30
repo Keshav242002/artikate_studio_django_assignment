@@ -1,6 +1,8 @@
 from django.db import models
 from django.conf import settings
 
+from tenants.managers import TenantManager
+
 
 class Product(models.Model):
     name = models.CharField(max_length=200)
@@ -19,6 +21,11 @@ class Order(models.Model):
         ('cancelled', 'Cancelled'),
     ]
 
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='orders',
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -28,6 +35,8 @@ class Order(models.Model):
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantManager()
 
     class Meta:
         ordering = ['-created_at']

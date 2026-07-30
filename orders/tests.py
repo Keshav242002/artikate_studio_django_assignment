@@ -5,6 +5,8 @@ from django.contrib.auth.models import User
 
 from orders.models import Product, Order, OrderItem
 from orders.views import OrderSummaryView, OrderSummaryBrokenView
+from tenants.context import reset_current_tenant, set_current_tenant
+from tenants.models import Tenant
 
 
 class OrderSummaryQueryCountTest(TestCase):
@@ -15,6 +17,7 @@ class OrderSummaryQueryCountTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Acme Corp', slug='acme')
         cls.user = User.objects.create_user(username='querytest', password='pass')
 
         products = []
@@ -26,6 +29,7 @@ class OrderSummaryQueryCountTest(TestCase):
         # 50 orders, 3 items each → enough to see the N+1 clearly
         for i in range(50):
             order = Order.objects.create(
+                tenant=cls.tenant,
                 user=cls.user,
                 status='confirmed',
                 total_amount=Decimal('30.00'),
@@ -37,6 +41,12 @@ class OrderSummaryQueryCountTest(TestCase):
                     quantity=1,
                     unit_price=Decimal('10.00'),
                 )
+
+    def setUp(self):
+        self._tenant_token = set_current_tenant(self.tenant)
+
+    def tearDown(self):
+        reset_current_tenant(self._tenant_token)
 
     def _make_request(self, view_class, user_id):
         factory = RequestFactory()

@@ -5,6 +5,8 @@ from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User
 
 from orders.models import Product, Order, OrderItem
+from tenants.context import reset_current_tenant, set_current_tenant
+from tenants.models import Tenant
 
 
 class Command(BaseCommand):
@@ -21,6 +23,20 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         num_orders = options['orders']
 
+        # management commands run outside the request/response cycle, so
+        # TenantMiddleware never binds a tenant here — bind one explicitly
+        # for the duration of this command instead.
+        tenant, _ = Tenant.objects.get_or_create(
+            slug='acme',
+            defaults={'name': 'Acme Corp'},
+        )
+        token = set_current_tenant(tenant)
+        try:
+            self._seed(tenant, num_orders)
+        finally:
+            reset_current_tenant(token)
+
+    def _seed(self, tenant, num_orders):
         # create a test user
         user, created = User.objects.get_or_create(
             username='testuser',
@@ -60,6 +76,7 @@ class Command(BaseCommand):
         orders_to_create = []
         for i in range(num_orders):
             orders_to_create.append(Order(
+                tenant=tenant,
                 user=user,
                 status=random.choice(statuses),
                 total_amount=0,

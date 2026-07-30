@@ -2,6 +2,9 @@ Django>=4.2,<5.0
 djangorestframework>=3.14,<4.0
 django-silk>=5.0,<6.0
 
+# Section 3 — multi-tenant isolation (JWT header fallback)
+pyjwt>=2.8,<3.0
+
 # Section 2 — async job queue
 celery>=5.3,<6.0
 redis>=5.0,<6.0
