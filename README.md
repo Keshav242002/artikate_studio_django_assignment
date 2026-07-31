@@ -150,6 +150,12 @@ Proves: tenant A cannot see tenant B's orders through any manager call (`.all()`
 
 No code — answers to two of the three questions (Pagination Trade-offs, File Upload Security) are in `ANSWERS.md`.
 
+## Optional: Live System Recording
+
+Screen recording of Section 2 running against a real Redis + Celery worker: submitting 250+ jobs, the sliding-window limiter holding at 200/minute in real time, and a failing job retrying with exponential backoff (1s, 2s, 4s, 8s) before landing in the dead-letter table.
+
+[Watch the recording](https://drive.google.com/file/d/1Uwo07mMnPptX6os2CHZr8De4ZVdZMkOc/view?usp=sharing)
+
 ## Project Structure
 
 ```

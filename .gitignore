@@ -9,6 +9,9 @@ build/
 db.sqlite3
 *.log
 
+# Redis
+dump.rdb
+
 # Virtual environment
 venv/
 .venv/
