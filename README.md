@@ -8,15 +8,27 @@
 ## Setup
 
 ```bash
-# Install Python 3.11 via pyenv (if not already installed)
-curl https://pyenv.run | bash
-export PYENV_ROOT="$HOME/.pyenv"
-export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
-pyenv install 3.11.9
+# Django 4.2 supports Python 3.10-3.12; Silk's build breaks on 3.13+ (see
+# section1/INVESTIGATION.md), so use whichever of these you already have
+# instead of installing a new interpreter.
+PY=""
+for v in python3.12 python3.11 python3.10; do
+  if command -v "$v" >/dev/null 2>&1; then PY="$v"; break; fi
+done
 
-# Create venv with Python 3.11
-/Users/$USER/.pyenv/versions/3.11.9/bin/python3.11 -m venv venv
+if [ -z "$PY" ]; then
+  # None of 3.10-3.12 found — install 3.11 via pyenv (compiles from source,
+  # a few minutes)
+  curl https://pyenv.run | bash
+  export PYENV_ROOT="$HOME/.pyenv"
+  export PATH="$PYENV_ROOT/bin:$PATH"
+  eval "$(pyenv init -)"
+  pyenv install 3.11.9
+  PY="$HOME/.pyenv/versions/3.11.9/bin/python3.11"
+fi
+
+# Create venv
+"$PY" -m venv venv
 source venv/bin/activate
 
 # Install dependencies
