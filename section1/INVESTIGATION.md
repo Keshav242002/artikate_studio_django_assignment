@@ -180,4 +180,6 @@ To reproduce this evidence:
 python manage.py profile_queries
 ```
 
+**Note on reproducing these exact numbers:** `seed_data` assigns each order a random 1-5 items (no fixed random seed), so a fresh `seed_data` run will not reproduce exactly 988 broken-endpoint queries — expect a similar order of magnitude (roughly 600-1500, scaling with however many items land in that run), while the fixed endpoint is always exactly 3 regardless of data volume. The number that *is* guaranteed to reproduce identically on every machine is the automated test in `orders/tests.py` (`assertNumQueries(201)` / `assertNumQueries(3)`), which seeds its own fixed dataset (50 orders, exactly 3 items each) instead of relying on `seed_data`. Run `python manage.py test orders -v2` for the reproducible proof; treat the `seed_data`/Silk numbers as illustrative of the same pattern at a larger, randomized scale.
+
 django-silk is also configured in `settings.py` (`silk.middleware.SilkyMiddleware`), and the silk dashboard is available at `/silk/` when the server is running. The profiler command uses `django.db.connection.queries` directly since silk's dashboard has a compatibility issue with Python 3.14, but silk is still recording request data in the background.

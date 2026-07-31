@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.11 (install via pyenv — see below)
+- Python 3.10–3.12 (uses whatever you already have; falls back to installing 3.11 via pyenv only if needed — see below)
 - No other external services needed for Section 1
 
 ## Setup
@@ -40,6 +40,11 @@ python manage.py migrate
 # Seed test data (creates testuser with 250 orders)
 python manage.py seed_data
 
+# Create an admin login (needed to view /admin/emailqueue/failedemailtask/ in Section 2)
+python manage.py createsuperuser --noinput --username admin --email admin@example.com
+# password not set by --noinput; set one interactively if you need to log in:
+python manage.py changepassword admin
+
 # Run the server
 python manage.py runserver
 ```
@@ -47,11 +52,11 @@ python manage.py runserver
 ## Section 1 — Diagnose a Broken System
 
 **Endpoints:**
-- Fixed (3 queries): http://127.0.0.1:8000/api/orders/summary/?user_id=1
-- Broken (986 queries): http://127.0.0.1:8000/api/orders/summary-broken/?user_id=1
+- Fixed (always 3 queries): http://127.0.0.1:8000/api/orders/summary/?user_id=1
+- Broken (N+1 — exact count varies by seed run, see note below): http://127.0.0.1:8000/api/orders/summary-broken/?user_id=1
 - Silk profiler: http://127.0.0.1:8000/silk/requests/
 
-**Run tests:**
+**Run tests (reproducible proof — fixed dataset, always 201 → 3 queries):**
 ```bash
 python manage.py test orders -v2
 ```
@@ -60,6 +65,7 @@ python manage.py test orders -v2
 ```bash
 python manage.py profile_queries
 ```
+Note: `seed_data` randomizes items-per-order (no fixed seed), so this command's broken-endpoint query count will differ slightly from the committed `section1/profiler_output.txt` (988) on each machine/run — the fixed endpoint is always exactly 3 regardless. See the note in `section1/INVESTIGATION.md` for why.
 
 **Files:**
 | File | Purpose |
@@ -67,11 +73,11 @@ python manage.py profile_queries
 | `orders/models.py` | Order, OrderItem, Product models |
 | `orders/serializers.py` | The serializer change that introduced the N+1 |
 | `orders/views.py` | Broken and fixed views side by side |
-| `orders/tests.py` | `assertNumQueries` proving 986 → 3 queries |
+| `orders/tests.py` | `assertNumQueries` proving 201 → 3 queries on a fixed 50-order fixture |
 | `section1/INVESTIGATION.md` | Step-by-step incident investigation |
 | `section1/silk_requests_list.png` | Silk dashboard showing both endpoints |
-| `section1/silk_broken_detail.png` | Silk detail: 986 queries, 1019ms |
-| `section1/silk_fixed_detail.png` | Silk detail: 3 queries, 66ms |
+| `section1/silk_broken_detail.png` | Silk detail from one seed run: 986 queries, 1019ms (illustrative, not exact-reproducible — see note above) |
+| `section1/silk_fixed_detail.png` | Silk detail: 3 queries, 66ms (always exact, regardless of seed) |
 | `section1/profiler_output.txt` | Raw profiler output with SQL patterns |
 | `ANSWERS.md` | Written answers for all sections |
 

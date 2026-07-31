@@ -109,6 +109,6 @@ class Command(BaseCommand):
             f'Created {num_orders} orders with {len(items_to_create)} items for user testuser (id={user.pk})'
         ))
         self.stdout.write(f'\nTo test, visit:')
-        self.stdout.write(f'  Broken:  http://127.0.0.1:8000/api/orders/summary/?user_id={user.pk}')
-        self.stdout.write(f'  Fixed:   http://127.0.0.1:8000/api/orders/summary-fixed/?user_id={user.pk}')
+        self.stdout.write(f'  Fixed:   http://127.0.0.1:8000/api/orders/summary/?user_id={user.pk}')
+        self.stdout.write(f'  Broken:  http://127.0.0.1:8000/api/orders/summary-broken/?user_id={user.pk}')
         self.stdout.write(f'  Silk:    http://127.0.0.1:8000/silk/')
